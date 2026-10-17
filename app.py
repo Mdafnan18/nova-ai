@@ -1,0 +1,374 @@
+import logging
+import os
+import re
+import secrets
+import threading
+import time
+from collections import OrderedDict, deque
+
+import requests
+from dotenv import load_dotenv
+from flask import Flask, jsonify, render_template, request, session
+from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("nova")
+
+
+# ---------- Settings (read from the .env file or the environment) ----------
+
+def env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_int(name, default, minimum, maximum):
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(value, maximum))
+
+
+DEBUG = env_bool("FLASK_DEBUG", False)
+HOST = os.environ.get("HOST", "127.0.0.1")
+PORT = env_int("PORT", 5000, 1, 65535)
+MAX_MESSAGE_CHARS = env_int("MAX_MESSAGE_CHARS", 1000, 1, 4000)
+MAX_HISTORY_MESSAGES = env_int("MAX_HISTORY_MESSAGES", 20, 2, 100)
+RATE_LIMIT_PER_MINUTE = env_int("RATE_LIMIT_PER_MINUTE", 30, 1, 600)
+MAX_SESSIONS = 500
+
+AI_MODE = os.environ.get("AI_MODE", "demo").strip().lower()
+if AI_MODE not in ("demo", "ollama"):
+    log.warning("AI_MODE '%s' is not known. Using demo mode.", AI_MODE)
+    AI_MODE = "demo"
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").strip().rstrip("/")
+if not OLLAMA_URL.startswith(("http://", "https://")):
+    log.warning("OLLAMA_URL must start with http:// or https://. Using the default.")
+    OLLAMA_URL = "http://127.0.0.1:11434"
+
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b").strip() or "qwen2.5:3b"
+OLLAMA_TIMEOUT_SECONDS = env_int("OLLAMA_TIMEOUT_SECONDS", 120, 5, 600)
+OLLAMA_MAX_TOKENS = env_int("OLLAMA_MAX_TOKENS", 300, 20, 2000)
+
+SYSTEM_PROMPT = (
+    "You are NOVA, a friendly futuristic AI avatar assistant. "
+    "Answer in simple, clear English. "
+    "Keep answers short, usually two to four sentences, because your answer will be spoken aloud. "
+    "Do not use markdown, bullet lists, or emojis. "
+    "If you do not know something, say so honestly."
+)
+
+app = Flask(__name__)
+
+if env_bool("TRUST_PROXY", False):
+    # On Render a proxy sits in front of the app. This lets Flask see the real visitor IP and https.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+secret_key = os.environ.get("SECRET_KEY")
+if not secret_key:
+    secret_key = secrets.token_hex(32)
+    log.warning("SECRET_KEY is not set. Using a temporary one; sessions reset when the server restarts.")
+
+app.secret_key = secret_key
+app.config.update(
+    MAX_CONTENT_LENGTH=16 * 1024,  # refuse requests bigger than 16 KB
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=env_bool("SESSION_COOKIE_SECURE", False),
+)
+
+
+# ---------- Conversation history (kept in the server's memory) ----------
+
+histories = OrderedDict()
+history_lock = threading.Lock()
+
+
+def get_session_id():
+    sid = session.get("sid")
+    if not isinstance(sid, str) or len(sid) != 32:
+        sid = secrets.token_hex(16)
+        session["sid"] = sid
+    return sid
+
+
+def get_history(sid):
+    with history_lock:
+        return [dict(item) for item in histories.get(sid, [])]
+
+
+def add_to_history(sid, role, content):
+    with history_lock:
+        history = histories.get(sid)
+        if history is None:
+            history = []
+            histories[sid] = history
+        histories.move_to_end(sid)
+        history.append({"role": role, "content": content})
+        del history[:-MAX_HISTORY_MESSAGES]
+        while len(histories) > MAX_SESSIONS:
+            histories.popitem(last=False)
+
+
+def history_count(sid):
+    with history_lock:
+        return len(histories.get(sid, []))
+
+
+def clear_history(sid):
+    with history_lock:
+        histories.pop(sid, None)
+
+
+# ---------- Simple rate limit (per IP address) ----------
+
+hits = {}
+hits_lock = threading.Lock()
+
+
+def rate_limited(key):
+    now = time.monotonic()
+    with hits_lock:
+        window = hits.setdefault(key, deque())
+        while window and now - window[0] > 60:
+            window.popleft()
+        if len(window) >= RATE_LIMIT_PER_MINUTE:
+            return True
+        window.append(now)
+        if len(hits) > 2000:
+            old_keys = [k for k, v in hits.items() if not v or now - v[-1] > 60]
+            for k in old_keys:
+                del hits[k]
+    return False
+
+
+# ---------- Helpers ----------
+
+def api_error(message, status):
+    response = jsonify({"error": message})
+    response.status_code = status
+    return response
+
+
+def clean_text(value):
+    # Remove hidden control characters but keep new lines and tabs.
+    return "".join(ch for ch in value if ch in "\n\t" or ch.isprintable()).strip()
+
+
+class AIError(Exception):
+    """A problem with the AI that we can explain to the user in plain words."""
+
+    def __init__(self, message, status=502):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+# ---------- Demo replies (used when AI_MODE=demo) ----------
+
+def demo_reply(text):
+    lower = text.lower()
+    words = set(re.findall(r"[a-z']+", lower))
+
+    if words & {"hi", "hello", "hey"}:
+        return "Hello! Nice to meet you. I'm NOVA, your futuristic AI companion."
+    if "who are you" in lower or "your name" in lower:
+        return "I'm NOVA, an animated AI avatar built with Flask, JavaScript and CSS."
+    if "what can you do" in lower:
+        return ("In demo mode I only know a few answers. With a local AI model I can answer "
+                "almost any question, and later I will listen to your voice and speak back.")
+    if "space" in words:
+        return "Fun fact: a day on Venus is longer than a year on Venus."
+    if "explain ai" in lower or "artificial intelligence" in lower:
+        return ("AI is software that learns patterns from lots of examples, "
+                "so it can answer questions or recognise things without being told every rule.")
+
+    preview = text if len(text) <= 80 else text[:80] + "..."
+    return 'You said: "' + preview + '". I am in demo mode, so I only know a few answers.'
+
+
+# ---------- Ollama (real local AI) ----------
+
+def ollama_status():
+    """Returns (is_ready, message). Used by the health check."""
+    try:
+        response = requests.get(OLLAMA_URL + "/api/tags", timeout=2)
+        response.raise_for_status()
+        names = [item.get("name", "") for item in response.json().get("models", [])]
+    except (requests.exceptions.RequestException, ValueError, AttributeError):
+        return False, "Ollama is not running. Open the Ollama app, then reload this page."
+
+    wanted = OLLAMA_MODEL if ":" in OLLAMA_MODEL else OLLAMA_MODEL + ":latest"
+    if wanted not in names:
+        return False, "The model %s is not installed. Run: ollama pull %s" % (OLLAMA_MODEL, OLLAMA_MODEL)
+
+    return True, "Local AI ready. Model: %s" % OLLAMA_MODEL
+
+
+def ask_ollama(history, user_message):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
+        {"role": "user", "content": user_message}
+    ]
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "keep_alive": "10m",  # keep the model in memory for 10 minutes so later answers are faster
+        "options": {"num_predict": OLLAMA_MAX_TOKENS},
+    }
+
+    try:
+        response = requests.post(OLLAMA_URL + "/api/chat", json=payload, timeout=OLLAMA_TIMEOUT_SECONDS)
+    except requests.exceptions.ConnectionError:
+        raise AIError("I cannot reach Ollama. Open the Ollama app and try again.", 503)
+    except requests.exceptions.Timeout:
+        raise AIError("The AI took too long to answer. Try a shorter question or a smaller model.", 504)
+    except requests.exceptions.RequestException:
+        log.exception("Ollama request failed")
+        raise AIError("Something went wrong while talking to Ollama.", 502)
+
+    if response.status_code == 404:
+        raise AIError(
+            "The model %s is not installed. Run: ollama pull %s" % (OLLAMA_MODEL, OLLAMA_MODEL), 503
+        )
+    if response.status_code != 200:
+        log.error("Ollama returned status %s: %s", response.status_code, response.text[:300])
+        raise AIError("Ollama returned an error. Check the server terminal for details.", 502)
+
+    try:
+        reply = response.json()["message"]["content"]
+    except (ValueError, KeyError, TypeError):
+        raise AIError("Ollama sent an answer I could not read.", 502)
+
+    reply = clean_text(reply) if isinstance(reply, str) else ""
+    if not reply:
+        raise AIError("The AI sent an empty answer. Please try again.", 502)
+
+    return reply[:2000]
+
+
+# ---------- Routes ----------
+
+@app.get("/")
+def home():
+    return render_template("index.html")
+
+
+@app.get("/api/health")
+def health():
+    if AI_MODE == "ollama":
+        ready, message = ollama_status()
+    else:
+        ready = True
+        message = "Demo mode: NOVA answers with a few built-in replies. Run the project locally with Ollama for full AI answers."
+
+    return jsonify({
+        "status": "ok",
+        "mode": AI_MODE,
+        "ai_ready": ready,
+        "message": message,
+        "max_message_chars": MAX_MESSAGE_CHARS,
+    })
+
+
+@app.post("/api/chat")
+def chat():
+    sid = get_session_id()
+
+    if rate_limited(request.remote_addr or sid):
+        return api_error("You are sending messages too fast. Please wait a moment.", 429)
+
+    if not request.is_json:
+        return api_error("Please send JSON.", 415)
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return api_error("The request body must be a JSON object.", 400)
+
+    message = data.get("message")
+    if not isinstance(message, str):
+        return api_error("The message must be text.", 400)
+
+    message = clean_text(message)
+    if not message:
+        return api_error("Please type a message first.", 400)
+    if len(message) > MAX_MESSAGE_CHARS:
+        return api_error("Your message is too long. The limit is %d characters." % MAX_MESSAGE_CHARS, 400)
+
+    if AI_MODE == "ollama":
+        try:
+            reply = ask_ollama(get_history(sid), message)
+        except AIError as error:
+            return api_error(error.message, error.status)
+    else:
+        reply = demo_reply(message)
+
+    # Only save the conversation turn when everything worked.
+    add_to_history(sid, "user", message)
+    add_to_history(sid, "assistant", reply)
+
+    return jsonify({"reply": reply, "mode": AI_MODE, "history_size": history_count(sid)})
+
+
+@app.post("/api/clear")
+def clear():
+    clear_history(get_session_id())
+    return jsonify({"status": "cleared"})
+
+
+# ---------- Safety: headers and errors ----------
+
+@app.after_request
+def add_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = "microphone=(self), camera=(), geolocation=()"
+
+    if not app.debug:
+        # In production only our own files may load. (Skipped in debug so Flask's error page works.)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+            "connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+        )
+
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+
+    return response
+
+
+@app.errorhandler(HTTPException)
+def handle_http_error(error):
+    if request.path.startswith("/api/"):
+        messages = {
+            400: "Bad request.",
+            404: "That address does not exist.",
+            405: "That method is not allowed here.",
+            413: "The request is too large.",
+            415: "Please send JSON.",
+        }
+        return api_error(messages.get(error.code, error.name), error.code)
+    return error
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    log.error("Unexpected error", exc_info=error)
+    if app.debug:
+        raise error  # on your laptop, show the full Flask error page
+    if request.path.startswith("/api/"):
+        return api_error("Something went wrong on the server. Please try again.", 500)
+    return "Something went wrong on the server.", 500
+
+
+if __name__ == "__main__":
+    # FLASK_DEBUG comes from your .env file. Never turn it on for a public website.
+    app.run(host=HOST, port=PORT, debug=DEBUG)

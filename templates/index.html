@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#050816">
+  <meta name="description" content="NOVA AI is a futuristic animated AI avatar chat application.">
+  <title>NOVA AI - Virtual Avatar Assistant</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='%2322e4ff'/></svg>">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/effects.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/voice.css') }}">
+</head>
+<body>
+  <a class="skip-link" href="#chat-input">Skip to chat</a>
+  <div class="bg" aria-hidden="true"></div>
+  <canvas id="particles" aria-hidden="true"></canvas>
+
+  <noscript>
+    <p class="noscript">NOVA AI needs JavaScript to work. Please turn JavaScript on in your browser.</p>
+  </noscript>
+
+  <div class="page">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <h1>NOVA <span>AI</span></h1>
+      </div>
+      <div class="pill" id="status-pill" data-state="idle">
+        <span class="pill-dot" aria-hidden="true"></span>
+        <span id="pill-text">Idle</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card avatar-card" aria-labelledby="avatar-title">
+        <h2 id="avatar-title" class="card-title">Your AI companion</h2>
+
+        <div class="avatar" id="avatar" data-state="idle" role="img" aria-label="NOVA avatar, idle">
+          <div class="ring ring-1"></div>
+          <div class="ring ring-2"></div>
+          <div class="ring ring-3"></div>
+          <div class="core">
+            <div class="face">
+              <div class="eyes">
+                <span class="eye"></span>
+                <span class="eye"></span>
+              </div>
+              <div class="mouth"></div>
+            </div>
+          </div>
+        </div>
+
+        <p id="status-text" class="status-text" aria-live="polite">Ready when you are.</p>
+
+        <div class="state-preview" role="group" aria-label="Preview avatar states">
+          <button type="button" class="chip" data-state="idle" aria-pressed="true">Idle</button>
+          <button type="button" class="chip" data-state="listening" aria-pressed="false">Listening</button>
+          <button type="button" class="chip" data-state="thinking" aria-pressed="false">Thinking</button>
+          <button type="button" class="chip" data-state="speaking" aria-pressed="false">Speaking</button>
+          <button type="button" class="chip" data-state="error" aria-pressed="false">Error</button>
+        </div>
+      </section>
+
+      <section class="card chat-card" aria-labelledby="chat-title">
+        <div class="chat-head">
+          <h2 id="chat-title" class="card-title">Conversation</h2>
+          <div class="head-actions">
+            <button type="button" class="chip" id="voice-toggle" aria-pressed="true">Voice: On</button>
+            <button type="button" class="chip" id="clear-btn">Clear chat</button>
+          </div>
+        </div>
+
+        <p class="notice">Checking the server...</p>
+
+        <div id="messages" class="messages" role="log" aria-live="polite" aria-label="Conversation messages"></div>
+
+        <div class="prompts" aria-label="Suggested prompts">
+          <button type="button" class="chip" data-prompt="Hello, who are you?">Hello, who are you?</button>
+          <button type="button" class="chip" data-prompt="What can you do?">What can you do?</button>
+          <button type="button" class="chip" data-prompt="Tell me a fun space fact">Fun space fact</button>
+          <button type="button" class="chip" data-prompt="Explain AI in simple words">Explain AI simply</button>
+        </div>
+
+        <form id="chat-form" class="composer" novalidate>
+          <label for="chat-input" class="sr-only">Type your message</label>
+          <textarea id="chat-input" rows="1" maxlength="1000" placeholder="Ask NOVA anything..."></textarea>
+          <button type="button" class="btn-mic" id="mic-btn" data-busy-disable aria-pressed="false" aria-label="Start voice input" title="Speak to NOVA">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V22h2v-3.08A7 7 0 0 0 19 12h-2z"/>
+            </svg>
+          </button>
+          <button type="submit" class="btn-primary" id="send-btn">Send</button>
+        </form>
+
+        <p id="voice-note" class="voice-note" hidden></p>
+
+        <div class="composer-meta">
+          <span id="form-error" class="form-error" role="alert"></span>
+          <span class="hint">Enter to send &middot; Shift+Enter for a new line</span>
+          <span id="char-count" class="char-count">0 / 1000</span>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>NOVA AI &middot; Built with Flask, HTML, CSS and JavaScript</p>
+    </footer>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/voice.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/effects.js') }}"></script>
+</body>
+</html>

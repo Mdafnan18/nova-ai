@@ -1,0 +1,99 @@
+/* NOVA AI - Stage 3 effects */
+
+/* ---------- Floating particles ---------- */
+
+#particles {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* ---------- Logo and title ---------- */
+
+.brand-mark {
+  animation: spin 8s linear infinite;
+}
+
+.brand h1 span {
+  background: linear-gradient(90deg, var(--cyan), var(--purple), var(--cyan));
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 6s linear infinite;
+}
+
+@keyframes shimmer {
+  from { background-position: 0% center; }
+  to { background-position: 200% center; }
+}
+
+/* ---------- Card hover glow ---------- */
+
+.card {
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.card:hover {
+  border-color: rgba(34, 228, 255, 0.35);
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.45),
+    0 0 40px rgba(155, 92, 255, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+/* ---------- Avatar: voice waves and eye tracking ---------- */
+
+.avatar::after {
+  content: "";
+  position: absolute;
+  inset: 18%;
+  z-index: -1;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.avatar[data-state="speaking"]::after {
+  animation: voice-wave 1.2s ease-out infinite;
+}
+
+.avatar[data-state="thinking"]::after {
+  animation: voice-wave 2s ease-out infinite;
+}
+
+@keyframes voice-wave {
+  from { transform: scale(0.9); opacity: 0.6; }
+  to { transform: scale(1.7); opacity: 0; }
+}
+
+.eyes {
+  translate: var(--look-x, 0px) var(--look-y, 0px);
+  transition: translate 0.15s ease-out;
+}
+
+/* ---------- Text box: hide the tiny scrollbar ---------- */
+
+.composer textarea {
+  scrollbar-width: none;
+}
+
+.composer textarea::-webkit-scrollbar {
+  display: none;
+}
+
+/* ---------- Reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .eyes {
+    translate: none !important;
+  }
+
+  .avatar::after {
+    display: none;
+  }
+}
