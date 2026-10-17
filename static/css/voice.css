@@ -66,3 +66,56 @@
     animation: none;
   }
 }
+/* Stage 11: voice settings panel */
+
+.voice-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.voice-panel[hidden] {
+  display: none;
+}
+
+.voice-row {
+  display: grid;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.voice-row select {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--glass-border);
+  background: rgba(5, 8, 22, 0.8);
+  color: var(--text);
+  font: inherit;
+}
+
+.voice-row select option {
+  background: #0b1030;
+  color: var(--text);
+}
+
+.voice-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--cyan);
+}
+
+.voice-rate-value {
+  color: var(--text);
+}
+
+.voice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}

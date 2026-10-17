@@ -20,6 +20,10 @@
   const canSpeak = Boolean(synth) && "SpeechSynthesisUtterance" in window;
   const canListen = Boolean(SpeechRecognitionClass);
 
+  const NAME_KEY = "nova-voice-name";
+  const RATE_KEY = "nova-voice-rate";
+  const SAMPLE_TEXT = "Hi, I'm NOVA. This is how I sound.";
+
   const ERROR_MESSAGES = {
     "not-allowed":
       "Microphone access is blocked. Click the lock icon in the address bar, allow Microphone, then reload the page. You can still type.",
@@ -42,7 +46,33 @@
     }
   }
 
-  /* ----- Voice on/off setting (remembered in this browser) ----- */
+  /* ----- Saved settings (kept in this browser) ----- */
+
+  function readSetting(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function writeSetting(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch (error) {
+      // Saving is optional. The setting still works for this visit.
+    }
+  }
+
+  function savedRate() {
+    const value = Number.parseFloat(readSetting(RATE_KEY));
+    if (!Number.isFinite(value)) {
+      return 1;
+    }
+    return Math.min(1.4, Math.max(0.7, value));
+  }
+
+  /* ----- Voice on/off setting ----- */
 
   let voiceOn = true;
   try {
@@ -58,7 +88,7 @@
 
   /* ----- Spoken replies (text to speech) ----- */
 
-  let voice = null;
+  let voice = null; // the automatic best match
   let speakToken = 0;
   let resolveCurrent = null;
 
@@ -93,6 +123,18 @@
     });
 
     voice = best;
+  }
+
+  // The voice you chose in Voice settings, or the automatic one.
+  function activeVoice() {
+    const name = readSetting(NAME_KEY);
+    if (name) {
+      const found = synth.getVoices().find((candidate) => candidate.name === name);
+      if (found) {
+        return found;
+      }
+    }
+    return voice;
   }
 
   // Long sentences can cut off in some browsers, so we speak short chunks one after another.
@@ -173,13 +215,14 @@
         const utterance = new SpeechSynthesisUtterance(chunks[index]);
         index += 1;
 
-        if (voice) {
-          utterance.voice = voice;
-          utterance.lang = voice.lang;
+        const chosen = activeVoice();
+        if (chosen) {
+          utterance.voice = chosen;
+          utterance.lang = chosen.lang;
         } else {
           utterance.lang = navigator.language || "en-US";
         }
-        utterance.rate = 1;
+        utterance.rate = savedRate();
         utterance.pitch = 1;
 
         utterance.onend = next;
@@ -193,11 +236,12 @@
       }
 
       // Safety net: never let NOVA get stuck "speaking" if the browser forgets to tell us it finished.
+      // A slow speed needs more time, so the time limit grows with it.
       watchdog = window.setTimeout(() => {
         if (myToken === speakToken) {
           stopSpeaking();
         }
-      }, Math.min(90000, 8000 + text.length * 90));
+      }, Math.min(120000, 8000 + (text.length * 90) / savedRate()));
 
       next();
     });
@@ -323,6 +367,134 @@
     }
   }
 
+  /* ----- Voice settings panel (voice list, speed, test) ----- */
+
+  function setupVoicePanel() {
+    const head = document.querySelector(".chat-head");
+    const actions = document.querySelector(".head-actions");
+    if (!head || !actions) {
+      return;
+    }
+
+    const toggleBtn = document.createElement("button");
+    toggleBtn.type = "button";
+    toggleBtn.className = "chip";
+    toggleBtn.id = "voice-settings-btn";
+    toggleBtn.textContent = "Voice settings";
+    toggleBtn.setAttribute("aria-expanded", "false");
+    toggleBtn.setAttribute("aria-controls", "voice-panel");
+    actions.insertBefore(toggleBtn, clearBtn.parentNode === actions ? clearBtn : null);
+
+    const panel = document.createElement("div");
+    panel.className = "voice-panel";
+    panel.id = "voice-panel";
+    panel.hidden = true;
+
+    const voiceRow = document.createElement("div");
+    voiceRow.className = "voice-row";
+    const voiceLabel = document.createElement("label");
+    voiceLabel.setAttribute("for", "voice-select");
+    voiceLabel.textContent = "Voice";
+    const select = document.createElement("select");
+    select.id = "voice-select";
+    voiceRow.append(voiceLabel, select);
+
+    const rateRow = document.createElement("div");
+    rateRow.className = "voice-row";
+    const rateLabel = document.createElement("label");
+    rateLabel.setAttribute("for", "voice-rate");
+    const rateValue = document.createElement("span");
+    rateValue.className = "voice-rate-value";
+    rateLabel.append("Speed: ", rateValue);
+    const range = document.createElement("input");
+    range.type = "range";
+    range.id = "voice-rate";
+    range.min = "0.7";
+    range.max = "1.4";
+    range.step = "0.1";
+    rateRow.append(rateLabel, range);
+
+    const buttons = document.createElement("div");
+    buttons.className = "voice-actions";
+    const testBtn = document.createElement("button");
+    testBtn.type = "button";
+    testBtn.className = "chip";
+    testBtn.textContent = "Test voice";
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.className = "chip";
+    resetBtn.textContent = "Reset";
+    buttons.append(testBtn, resetBtn);
+
+    panel.append(voiceRow, rateRow, buttons);
+    head.insertAdjacentElement("afterend", panel);
+
+    function showRate() {
+      rateValue.textContent = Number(range.value).toFixed(1) + "x";
+    }
+
+    function populateVoices() {
+      const all = synth.getVoices();
+      const english = all.filter((candidate) => (candidate.lang || "").toLowerCase().startsWith("en"));
+      const list = english.length > 0 ? english : all;
+      const saved = readSetting(NAME_KEY) || "";
+
+      select.replaceChildren();
+
+      const auto = document.createElement("option");
+      auto.value = "";
+      auto.textContent = "Automatic (best match)";
+      select.append(auto);
+
+      list.forEach((candidate) => {
+        const option = document.createElement("option");
+        option.value = candidate.name;
+        option.textContent = candidate.name + " (" + candidate.lang + ")";
+        select.append(option);
+      });
+
+      select.value = list.some((candidate) => candidate.name === saved) ? saved : "";
+    }
+
+    toggleBtn.addEventListener("click", () => {
+      panel.hidden = !panel.hidden;
+      toggleBtn.setAttribute("aria-expanded", String(!panel.hidden));
+    });
+
+    select.addEventListener("change", () => {
+      writeSetting(NAME_KEY, select.value);
+    });
+
+    range.addEventListener("input", () => {
+      writeSetting(RATE_KEY, range.value);
+      showRate();
+    });
+
+    testBtn.addEventListener("click", () => {
+      if (chat.isBusy() || listening) {
+        return;
+      }
+      chat.setState("speaking");
+      speak(SAMPLE_TEXT).then(settleIdle);
+    });
+
+    resetBtn.addEventListener("click", () => {
+      writeSetting(NAME_KEY, "");
+      writeSetting(RATE_KEY, "1");
+      select.value = "";
+      range.value = "1";
+      showRate();
+    });
+
+    range.value = String(savedRate());
+    showRate();
+    populateVoices();
+
+    if (typeof synth.addEventListener === "function") {
+      synth.addEventListener("voiceschanged", populateVoices);
+    }
+  }
+
   /* ----- Connect everything ----- */
 
   const notes = [];
@@ -350,6 +522,7 @@
     if (typeof synth.addEventListener === "function") {
       synth.addEventListener("voiceschanged", pickVoice);
     }
+    setupVoicePanel();
   }
 
   // app.js calls this when a reply arrives. Returning a promise makes the avatar "speak" until it resolves.
@@ -362,11 +535,7 @@
 
   voiceToggle.addEventListener("click", () => {
     voiceOn = !voiceOn;
-    try {
-      window.localStorage.setItem("nova-voice", voiceOn ? "on" : "off");
-    } catch (error) {
-      // Saving the setting is optional.
-    }
+    writeSetting("nova-voice", voiceOn ? "on" : "off");
     renderVoiceToggle();
     if (!voiceOn) {
       stopSpeaking(); // switching voice off also stops NOVA in the middle of a sentence
