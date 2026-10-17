@@ -1,0 +1,116 @@
+/* NOVA AI - Stage 10 color themes.
+   One number, --shift, moves every cyan and purple color to a new hue. */
+
+:root {
+  --shift: 0;
+  --cyan: hsl(calc(187 + var(--shift)) 100% 57%);
+  --purple: hsl(calc(263 + var(--shift)) 100% 68%);
+}
+
+:root[data-theme="aurora"] {
+  --shift: -45;
+}
+
+:root[data-theme="sunset"] {
+  --shift: 150;
+}
+
+:root[data-theme="nebula"] {
+  --shift: 60;
+}
+
+/* Background glow */
+.bg {
+  background:
+    radial-gradient(60rem 40rem at 15% 10%, hsl(calc(187 + var(--shift)) 100% 57% / 0.18), transparent 60%),
+    radial-gradient(50rem 40rem at 90% 20%, hsl(calc(263 + var(--shift)) 100% 68% / 0.22), transparent 60%),
+    radial-gradient(40rem 30rem at 50% 100%, hsl(calc(244 + var(--shift)) 100% 62% / 0.18), transparent 60%),
+    var(--bg);
+}
+
+/* Avatar body */
+.core {
+  background:
+    radial-gradient(circle at 34% 28%, rgba(255, 255, 255, 0.55) 0, rgba(255, 255, 255, 0) 22%),
+    radial-gradient(
+      circle at 50% 55%,
+      color-mix(in srgb, var(--accent) 70%, #0a1030) 0%,
+      hsl(calc(247 + var(--shift)) 62% 44%) 55%,
+      hsl(calc(251 + var(--shift)) 67% 18%) 100%
+    );
+}
+
+/* Floating dots: the canvas is turned by the same number of degrees */
+#particles {
+  filter: hue-rotate(calc(var(--shift) * 1deg));
+}
+
+/* A few buttons and bubbles that used fixed colors */
+.chip:hover:not(:disabled) {
+  background: hsl(calc(187 + var(--shift)) 100% 57% / 0.12);
+}
+
+.chip[aria-pressed="true"] {
+  background: hsl(calc(187 + var(--shift)) 100% 57% / 0.18);
+}
+
+.btn-primary {
+  box-shadow: 0 8px 24px hsl(calc(187 + var(--shift)) 100% 57% / 0.25);
+}
+
+.msg-user {
+  background: linear-gradient(
+    135deg,
+    hsl(calc(187 + var(--shift)) 100% 57% / 0.25),
+    hsl(calc(263 + var(--shift)) 100% 68% / 0.35)
+  );
+}
+
+/* Theme picker under the avatar */
+.theme-picker {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.theme-label {
+  flex-basis: 100%;
+  margin: 0;
+  text-align: center;
+  font-size: 0.8rem;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.theme-chip {
+  --swatch: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.theme-chip::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: linear-gradient(
+    135deg,
+    hsl(calc(187 + var(--swatch)) 100% 57%),
+    hsl(calc(263 + var(--swatch)) 100% 68%)
+  );
+}
+
+.theme-chip[data-theme-id="aurora"] {
+  --swatch: -45;
+}
+
+.theme-chip[data-theme-id="sunset"] {
+  --swatch: 150;
+}
+
+.theme-chip[data-theme-id="nebula"] {
+  --swatch: 60;
+}
