@@ -29,6 +29,9 @@
   const stateButtons = document.querySelectorAll(".state-preview [data-state]");
   const promptButtons = document.querySelectorAll(".prompts [data-prompt]");
 
+  // Streaming needs these two browser features. Almost every modern browser has them.
+  const canStream = Boolean(window.ReadableStream) && typeof window.TextDecoder !== "undefined";
+
   let busy = false;
   let replyHandler = null; // voice.js plugs in here to speak replies aloud
 
@@ -53,6 +56,26 @@
 
   /* ----- Talking to the Flask backend ----- */
 
+  function friendlyError(error) {
+    if (error.name === "AbortError") {
+      return new Error("The server took too long to answer. Please try again.");
+    }
+    if (error instanceof TypeError) {
+      return new Error("I cannot reach the server. Is python app.py still running?");
+    }
+    return error;
+  }
+
+  async function readError(response) {
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (parseError) {
+      data = null;
+    }
+    return new Error(data && data.error ? data.error : "The server returned an error (" + response.status + ").");
+  }
+
   async function callApi(path, options) {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -60,26 +83,12 @@
     try {
       const response = await fetch(path, { ...options, signal: controller.signal });
 
-      let data = null;
-      try {
-        data = await response.json();
-      } catch (parseError) {
-        data = null;
-      }
-
       if (!response.ok) {
-        const message = data && data.error ? data.error : "The server returned an error (" + response.status + ").";
-        throw new Error(message);
+        throw await readError(response);
       }
-      return data;
+      return await response.json();
     } catch (error) {
-      if (error.name === "AbortError") {
-        throw new Error("The server took too long to answer. Please try again.");
-      }
-      if (error instanceof TypeError) {
-        throw new Error("I cannot reach the server. Is python app.py still running?");
-      }
-      throw error;
+      throw friendlyError(error);
     } finally {
       window.clearTimeout(timer);
     }
@@ -91,6 +100,99 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body || {}),
     });
+  }
+
+  // Reads the answer piece by piece. onToken is called for every new piece of text.
+  async function streamChat(text, onToken) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let reader = null;
+
+    try {
+      const response = await fetch("/api/chat/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw await readError(response);
+      }
+      if (!response.body) {
+        throw new Error("The server did not send an answer.");
+      }
+
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalReply = null;
+
+      function handleLine(line) {
+        if (!line.trim()) {
+          return;
+        }
+
+        let event = null;
+        try {
+          event = JSON.parse(line);
+        } catch (parseError) {
+          return; // ignore a broken line
+        }
+
+        if (event.type === "token" && typeof event.text === "string") {
+          onToken(event.text);
+        } else if (event.type === "done" && typeof event.reply === "string") {
+          finalReply = event.reply;
+        } else if (event.type === "error") {
+          throw new Error(typeof event.error === "string" ? event.error : "The answer stopped unexpectedly.");
+        }
+      }
+
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          break;
+        }
+
+        buffer += decoder.decode(chunk.value, { stream: true });
+
+        let index = buffer.indexOf("\n");
+        while (index !== -1) {
+          handleLine(buffer.slice(0, index));
+          buffer = buffer.slice(index + 1);
+          index = buffer.indexOf("\n");
+        }
+      }
+
+      buffer += decoder.decode();
+      handleLine(buffer);
+
+      if (finalReply === null) {
+        throw new Error("The answer was cut off. Please try again.");
+      }
+      return finalReply;
+    } catch (error) {
+      throw friendlyError(error);
+    } finally {
+      window.clearTimeout(timer);
+      if (reader) {
+        try {
+          reader.cancel().catch(() => {});
+        } catch (cancelError) {
+          // The stream was already closed. Nothing to do.
+        }
+      }
+    }
+  }
+
+  // Streams the answer if the browser can. Otherwise it waits for the whole answer.
+  async function getAnswer(text, onToken) {
+    if (canStream) {
+      return streamChat(text, onToken);
+    }
+    const data = await postJson("/api/chat", { message: text });
+    return data && typeof data.reply === "string" ? data.reply : "";
   }
 
   /* ----- Chat helpers ----- */
@@ -223,6 +325,8 @@
     setState("thinking");
 
     const typing = showTyping();
+    let bubble = null; // NOVA's answer bubble, created when the first words arrive
+    let partial = "";
 
     // The first answer can be slow while the AI model loads into memory.
     const slowTimer = window.setTimeout(() => {
@@ -230,29 +334,48 @@
     }, 6000);
 
     try {
-      const data = await postJson("/api/chat", { message: text });
+      const reply = await getAnswer(text, (piece) => {
+        if (!bubble) {
+          window.clearTimeout(slowTimer);
+          typing.remove();
+          bubble = addMessage("assistant", "");
+          setState("speaking");
+        }
+        partial += piece;
+        bubble.querySelector(".msg-body").textContent = partial;
+        scrollToBottom();
+      });
+
       window.clearTimeout(slowTimer);
       typing.remove();
 
-      const reply = data && typeof data.reply === "string" ? data.reply : "";
       if (!reply) {
         throw new Error("The server sent an empty answer.");
       }
 
-      addMessage("assistant", reply);
-      setState("speaking");
+      const streamed = bubble !== null;
+      if (streamed) {
+        bubble.querySelector(".msg-body").textContent = reply; // the cleaned final text
+        scrollToBottom();
+      } else {
+        addMessage("assistant", reply);
+        setState("speaking");
+      }
 
       // If voice is on, wait until NOVA has finished speaking. Otherwise wait a short moment.
       const speaking = startSpeakingReply(reply);
       if (speaking && typeof speaking.then === "function") {
         await speaking;
       } else {
-        await wait(Math.min(1200 + reply.length * 30, 8000));
+        await wait(streamed ? 600 : Math.min(1200 + reply.length * 30, 8000));
       }
       setState("idle");
     } catch (error) {
       window.clearTimeout(slowTimer);
       typing.remove();
+      if (bubble) {
+        bubble.remove(); // the server did not save this answer, so we do not keep half of it
+      }
       addMessage("assistant", "Error: " + error.message);
       setState("error");
 

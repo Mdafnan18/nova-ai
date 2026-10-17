@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -9,7 +10,7 @@ from datetime import timedelta
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, Response, jsonify, render_template, request, session
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -43,6 +44,7 @@ MAX_MESSAGE_CHARS = env_int("MAX_MESSAGE_CHARS", 1000, 1, 4000)
 MAX_HISTORY_MESSAGES = env_int("MAX_HISTORY_MESSAGES", 20, 2, 100)
 RATE_LIMIT_PER_MINUTE = env_int("RATE_LIMIT_PER_MINUTE", 30, 1, 600)
 MAX_SESSIONS = 500
+MAX_REPLY_CHARS = 2000
 
 AI_MODE = os.environ.get("AI_MODE", "demo").strip().lower()
 if AI_MODE not in ("demo", "ollama"):
@@ -80,8 +82,8 @@ if not secret_key:
 app.secret_key = secret_key
 app.config.update(
     MAX_CONTENT_LENGTH=16 * 1024,  # refuse requests bigger than 16 KB
-    SESSION_COOKIE_HTTPONLY=True,
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+    SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=env_bool("SESSION_COOKIE_SECURE", False),
 )
@@ -165,6 +167,11 @@ def clean_text(value):
     return "".join(ch for ch in value if ch in "\n\t" or ch.isprintable()).strip()
 
 
+def ndjson(event):
+    # One JSON object per line. The browser reads the answer line by line while it streams in.
+    return json.dumps(event, ensure_ascii=False) + "\n"
+
+
 class AIError(Exception):
     """A problem with the AI that we can explain to the user in plain words."""
 
@@ -186,7 +193,7 @@ def demo_reply(text):
         return "I'm NOVA, an animated AI avatar built with Flask, JavaScript and CSS."
     if "what can you do" in lower:
         return ("In demo mode I only know a few answers. With a local AI model I can answer "
-                "almost any question, and later I will listen to your voice and speak back.")
+                "almost any question, and I can listen to your voice and speak back.")
     if "space" in words:
         return "Fun fact: a day on Venus is longer than a year on Venus."
     if "explain ai" in lower or "artificial intelligence" in lower:
@@ -195,6 +202,13 @@ def demo_reply(text):
 
     preview = text if len(text) <= 80 else text[:80] + "..."
     return 'You said: "' + preview + '". I am in demo mode, so I only know a few answers.'
+
+
+def demo_stream(text):
+    # Sends the demo reply word by word, so the public demo also shows the typing effect.
+    for word in demo_reply(text).split(" "):
+        yield word + " "
+        time.sleep(0.03)
 
 
 # ---------- Ollama (real local AI) ----------
@@ -215,20 +229,28 @@ def ollama_status():
     return True, "Local AI ready. Model: %s" % OLLAMA_MODEL
 
 
-def ask_ollama(history, user_message):
+def build_ollama_payload(history, user_message, stream):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
         {"role": "user", "content": user_message}
     ]
-    payload = {
+    return {
         "model": OLLAMA_MODEL,
         "messages": messages,
-        "stream": False,
+        "stream": stream,
         "keep_alive": "10m",  # keep the model in memory for 10 minutes so later answers are faster
         "options": {"num_predict": OLLAMA_MAX_TOKENS},
     }
 
+
+def ollama_post(payload, stream):
+    """Sends the request to Ollama and turns every problem into a friendly AIError."""
     try:
-        response = requests.post(OLLAMA_URL + "/api/chat", json=payload, timeout=OLLAMA_TIMEOUT_SECONDS)
+        response = requests.post(
+            OLLAMA_URL + "/api/chat",
+            json=payload,
+            stream=stream,
+            timeout=(5, OLLAMA_TIMEOUT_SECONDS),
+        )
     except requests.exceptions.ConnectionError:
         raise AIError("I cannot reach Ollama. Open the Ollama app and try again.", 503)
     except requests.exceptions.Timeout:
@@ -238,23 +260,104 @@ def ask_ollama(history, user_message):
         raise AIError("Something went wrong while talking to Ollama.", 502)
 
     if response.status_code == 404:
+        response.close()
         raise AIError(
             "The model %s is not installed. Run: ollama pull %s" % (OLLAMA_MODEL, OLLAMA_MODEL), 503
         )
     if response.status_code != 200:
         log.error("Ollama returned status %s: %s", response.status_code, response.text[:300])
+        response.close()
         raise AIError("Ollama returned an error. Check the server terminal for details.", 502)
+
+    return response
+
+
+def ask_ollama(history, user_message):
+    """Waits for the whole answer. Used by /api/chat."""
+    response = ollama_post(build_ollama_payload(history, user_message, False), False)
 
     try:
         reply = response.json()["message"]["content"]
     except (ValueError, KeyError, TypeError):
         raise AIError("Ollama sent an answer I could not read.", 502)
+    finally:
+        response.close()
 
     reply = clean_text(reply) if isinstance(reply, str) else ""
     if not reply:
         raise AIError("The AI sent an empty answer. Please try again.", 502)
 
-    return reply[:2000]
+    return reply[:MAX_REPLY_CHARS]
+
+
+def ollama_stream(history, user_message):
+    """Yields the answer in small pieces while Ollama writes it. Used by /api/chat/stream."""
+    response = ollama_post(build_ollama_payload(history, user_message, True), True)
+    deadline = time.monotonic() + OLLAMA_TIMEOUT_SECONDS
+
+    try:
+        for line in response.iter_lines():
+            if time.monotonic() > deadline:
+                raise AIError("The AI took too long to answer. Try a shorter question or a smaller model.", 504)
+            if not line:
+                continue
+
+            try:
+                data = json.loads(line)
+            except ValueError:
+                raise AIError("Ollama sent an answer I could not read.", 502)
+            if not isinstance(data, dict):
+                raise AIError("Ollama sent an answer I could not read.", 502)
+
+            if data.get("error"):
+                log.error("Ollama stream error: %s", data["error"])
+                raise AIError("Ollama stopped with an error. Check the server terminal for details.", 502)
+
+            message = data.get("message")
+            piece = message.get("content") if isinstance(message, dict) else None
+            if isinstance(piece, str) and piece:
+                yield piece
+
+            if data.get("done"):
+                break
+    except requests.exceptions.Timeout:
+        raise AIError("The AI took too long to answer. Try a shorter question or a smaller model.", 504)
+    except requests.exceptions.RequestException:
+        log.exception("The connection to Ollama was lost while streaming")
+        raise AIError("The connection to Ollama was lost.", 502)
+    finally:
+        response.close()
+
+
+# ---------- Checking a chat request ----------
+
+def read_chat_message():
+    """Checks the request. Returns (session_id, message, error_response)."""
+    sid = get_session_id()
+
+    if rate_limited(request.remote_addr or sid):
+        return sid, None, api_error("You are sending messages too fast. Please wait a moment.", 429)
+
+    if not request.is_json:
+        return sid, None, api_error("Please send JSON.", 415)
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return sid, None, api_error("The request body must be a JSON object.", 400)
+
+    message = data.get("message")
+    if not isinstance(message, str):
+        return sid, None, api_error("The message must be text.", 400)
+
+    message = clean_text(message)
+    if not message:
+        return sid, None, api_error("Please type a message first.", 400)
+    if len(message) > MAX_MESSAGE_CHARS:
+        return sid, None, api_error(
+            "Your message is too long. The limit is %d characters." % MAX_MESSAGE_CHARS, 400
+        )
+
+    return sid, message, None
 
 
 # ---------- Routes ----------
@@ -283,33 +386,15 @@ def health():
 
 @app.post("/api/chat")
 def chat():
-    sid = get_session_id()
-
-    if rate_limited(request.remote_addr or sid):
-        return api_error("You are sending messages too fast. Please wait a moment.", 429)
-
-    if not request.is_json:
-        return api_error("Please send JSON.", 415)
-
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return api_error("The request body must be a JSON object.", 400)
-
-    message = data.get("message")
-    if not isinstance(message, str):
-        return api_error("The message must be text.", 400)
-
-    message = clean_text(message)
-    if not message:
-        return api_error("Please type a message first.", 400)
-    if len(message) > MAX_MESSAGE_CHARS:
-        return api_error("Your message is too long. The limit is %d characters." % MAX_MESSAGE_CHARS, 400)
+    sid, message, error = read_chat_message()
+    if error is not None:
+        return error
 
     if AI_MODE == "ollama":
         try:
             reply = ask_ollama(get_history(sid), message)
-        except AIError as error:
-            return api_error(error.message, error.status)
+        except AIError as problem:
+            return api_error(problem.message, problem.status)
     else:
         reply = demo_reply(message)
 
@@ -318,6 +403,63 @@ def chat():
     add_to_history(sid, "assistant", reply)
 
     return jsonify({"reply": reply, "mode": AI_MODE, "history_size": history_count(sid)})
+
+
+@app.post("/api/chat/stream")
+def chat_stream():
+    sid, message, error = read_chat_message()
+    if error is not None:
+        return error
+
+    if AI_MODE == "ollama":
+        pieces_iter = ollama_stream(get_history(sid), message)
+    else:
+        pieces_iter = demo_stream(message)
+
+    # Wait for the first piece. If the AI is not available, we can still answer with a proper error code.
+    try:
+        first = next(pieces_iter)
+    except StopIteration:
+        return api_error("The AI sent an empty answer. Please try again.", 502)
+    except AIError as problem:
+        return api_error(problem.message, problem.status)
+
+    def generate():
+        pieces = [first]
+        failed = None
+
+        try:
+            yield ndjson({"type": "token", "text": first})
+            size = len(first)
+            for piece in pieces_iter:
+                pieces.append(piece)
+                size += len(piece)
+                yield ndjson({"type": "token", "text": piece})
+                if size >= MAX_REPLY_CHARS:
+                    break
+        except AIError as problem:
+            failed = problem.message
+        except Exception:
+            log.exception("Unexpected error while streaming an answer")
+            failed = "Something went wrong on the server. Please try again."
+        finally:
+            pieces_iter.close()
+
+        if failed:
+            yield ndjson({"type": "error", "error": failed})
+            return
+
+        reply = clean_text("".join(pieces))[:MAX_REPLY_CHARS]
+        if not reply:
+            yield ndjson({"type": "error", "error": "The AI sent an empty answer. Please try again."})
+            return
+
+        # Only save the conversation turn when the whole answer arrived.
+        add_to_history(sid, "user", message)
+        add_to_history(sid, "assistant", reply)
+        yield ndjson({"type": "done", "reply": reply, "mode": AI_MODE, "history_size": history_count(sid)})
+
+    return Response(generate(), mimetype="application/x-ndjson", headers={"X-Accel-Buffering": "no"})
 
 
 @app.get("/api/history")
