@@ -333,10 +333,32 @@
     },
   };
 
+  /* ----- Restore the conversation after a page reload ----- */
+
+  async function restoreHistory() {
+    try {
+      const data = await callApi("/api/history", { method: "GET" });
+      const saved = data && Array.isArray(data.messages) ? data.messages : [];
+
+      saved.forEach((item) => {
+        if (item && typeof item.content === "string" && (item.role === "user" || item.role === "assistant")) {
+          addMessage(item.role, item.content);
+        }
+      });
+
+      if (saved.length > 0) {
+        return;
+      }
+    } catch (error) {
+      // If the saved messages cannot be loaded, we simply start with the welcome message.
+    }
+
+    addWelcome();
+  }
+
   /* ----- Start ----- */
 
   setState("idle");
-  addWelcome();
   updateCount();
-  checkHealth();
+  restoreHistory().then(checkHealth);
 })();

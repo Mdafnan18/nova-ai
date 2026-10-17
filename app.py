@@ -5,6 +5,7 @@ import secrets
 import threading
 import time
 from collections import OrderedDict, deque
+from datetime import timedelta
 
 import requests
 from dotenv import load_dotenv
@@ -80,6 +81,7 @@ app.secret_key = secret_key
 app.config.update(
     MAX_CONTENT_LENGTH=16 * 1024,  # refuse requests bigger than 16 KB
     SESSION_COOKIE_HTTPONLY=True,
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=env_bool("SESSION_COOKIE_SECURE", False),
 )
@@ -96,6 +98,7 @@ def get_session_id():
     if not isinstance(sid, str) or len(sid) != 32:
         sid = secrets.token_hex(16)
         session["sid"] = sid
+    session.permanent = True  # keep the cookie for 7 days, not just until the browser closes
     return sid
 
 
@@ -315,6 +318,11 @@ def chat():
     add_to_history(sid, "assistant", reply)
 
     return jsonify({"reply": reply, "mode": AI_MODE, "history_size": history_count(sid)})
+
+
+@app.get("/api/history")
+def chat_history():
+    return jsonify({"messages": get_history(get_session_id())})
 
 
 @app.post("/api/clear")
