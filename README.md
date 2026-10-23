@@ -20,6 +20,7 @@ The public website runs in **demo mode** with a few built-in replies, because a 
 - Animated avatar with five states: idle, listening, thinking, speaking and error
 - Glowing orbital rings, floating particles, blinking eyes and eyes that follow the mouse
 - Chat with real AI answers from a local model (Ollama), with a short conversation memory
+- Streaming answers that appear word by word as the AI writes them
 - Voice input with the microphone, with permission handling and a typed fallback
 - Spoken replies with a voice on/off button
 - Enter to send, Shift+Enter for a new line, clear chat and suggested prompts

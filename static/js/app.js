@@ -33,7 +33,8 @@
   const canStream = Boolean(window.ReadableStream) && typeof window.TextDecoder !== "undefined";
 
   let busy = false;
-  let replyHandler = null; // voice.js plugs in here to speak replies aloud
+  let replyHandler = null; // voice.js plugs in here to speak a finished reply aloud
+  let streamHandler = null; // voice.js plugs in here to speak while the answer is still being written
 
   const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
@@ -265,9 +266,19 @@
     charCount.textContent = input.value.length + " / " + maxLength;
   }
 
+  // Speaks a finished reply. Used when the answer did not stream.
   function startSpeakingReply(reply) {
     try {
       return replyHandler ? replyHandler(reply) : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // Starts a speaker that talks sentence by sentence while the answer is still being written.
+  function startStreamSpeaker() {
+    try {
+      return streamHandler ? streamHandler() : null;
     } catch (error) {
       return null;
     }
@@ -327,6 +338,7 @@
     const typing = showTyping();
     let bubble = null; // NOVA's answer bubble, created when the first words arrive
     let partial = "";
+    let speaker = null; // speaks the answer while it is still being written
 
     // The first answer can be slow while the AI model loads into memory.
     const slowTimer = window.setTimeout(() => {
@@ -340,10 +352,20 @@
           typing.remove();
           bubble = addMessage("assistant", "");
           setState("speaking");
+          speaker = startStreamSpeaker();
         }
+
         partial += piece;
         bubble.querySelector(".msg-body").textContent = partial;
         scrollToBottom();
+
+        if (speaker) {
+          try {
+            speaker.push(piece);
+          } catch (speechError) {
+            speaker = null; // if speaking breaks, the text still keeps streaming
+          }
+        }
       });
 
       window.clearTimeout(slowTimer);
@@ -362,8 +384,19 @@
         setState("speaking");
       }
 
-      // If voice is on, wait until NOVA has finished speaking. Otherwise wait a short moment.
-      const speaking = startSpeakingReply(reply);
+      // If a stream speaker is running, it speaks the sentences that are left.
+      // Otherwise the finished reply is spoken in one go (or we just wait a moment).
+      let speaking = null;
+      if (speaker) {
+        try {
+          speaking = speaker.finish(reply);
+        } catch (speechError) {
+          speaking = null;
+        }
+      } else {
+        speaking = startSpeakingReply(reply);
+      }
+
       if (speaking && typeof speaking.then === "function") {
         await speaking;
       } else {
@@ -373,6 +406,14 @@
     } catch (error) {
       window.clearTimeout(slowTimer);
       typing.remove();
+
+      if (speaker) {
+        try {
+          speaker.abort(); // stop talking if the answer failed halfway
+        } catch (speechError) {
+          // Nothing to stop.
+        }
+      }
       if (bubble) {
         bubble.remove(); // the server did not save this answer, so we do not keep half of it
       }
@@ -453,6 +494,9 @@
     isBusy: () => busy,
     setReplyHandler: (handler) => {
       replyHandler = typeof handler === "function" ? handler : null;
+    },
+    setStreamHandler: (handler) => {
+      streamHandler = typeof handler === "function" ? handler : null;
     },
   };
 

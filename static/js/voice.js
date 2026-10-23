@@ -184,6 +184,21 @@
     }
   }
 
+  function newUtterance(text) {
+    const utterance = new SpeechSynthesisUtterance(text);
+    const chosen = activeVoice();
+
+    if (chosen) {
+      utterance.voice = chosen;
+      utterance.lang = chosen.lang;
+    } else {
+      utterance.lang = navigator.language || "en-US";
+    }
+    utterance.rate = savedRate();
+    utterance.pitch = 1;
+    return utterance;
+  }
+
   function speak(text) {
     return new Promise((resolve) => {
       stopSpeaking();
@@ -212,18 +227,8 @@
           return;
         }
 
-        const utterance = new SpeechSynthesisUtterance(chunks[index]);
+        const utterance = newUtterance(chunks[index]);
         index += 1;
-
-        const chosen = activeVoice();
-        if (chosen) {
-          utterance.voice = chosen;
-          utterance.lang = chosen.lang;
-        } else {
-          utterance.lang = navigator.language || "en-US";
-        }
-        utterance.rate = savedRate();
-        utterance.pitch = 1;
 
         utterance.onend = next;
         utterance.onerror = () => {
@@ -245,6 +250,132 @@
 
       next();
     });
+  }
+
+  // Speaks an answer sentence by sentence while it is still being written.
+  // app.js calls push() for every new piece of text, then finish() when the answer is complete.
+  function createStreamSpeaker() {
+    stopSpeaking();
+
+    const myToken = speakToken;
+    const SENTENCE_END = /[.!?]+["')\]]*\s|\n/; // a full stop, question mark or new line
+    const queue = []; // sentences that are ready to be spoken
+    let pending = ""; // text that has arrived but is not a full sentence yet
+    let speakingNow = false;
+    let finished = false;
+    let completed = false;
+    let watchdog = 0;
+    let resolveDone = null;
+
+    const done = new Promise((resolve) => {
+      resolveDone = resolve;
+    });
+    resolveCurrent = resolveDone; // so stopSpeaking() can end this speaker too
+
+    function complete() {
+      if (completed) {
+        return;
+      }
+      completed = true;
+      window.clearTimeout(watchdog);
+      if (resolveCurrent === resolveDone) {
+        resolveCurrent = null;
+      }
+      resolveDone();
+    }
+
+    function enqueue(text) {
+      const clean = text.trim();
+      if (clean) {
+        queue.push(clean);
+      }
+    }
+
+    function takeSentences(flushAll) {
+      let match = SENTENCE_END.exec(pending);
+      while (match) {
+        const end = match.index + match[0].length;
+        enqueue(pending.slice(0, end));
+        pending = pending.slice(end);
+        match = SENTENCE_END.exec(pending);
+      }
+
+      // A very long sentence is spoken in pieces, so NOVA does not stay silent for too long.
+      while (pending.length > 220) {
+        let cut = pending.lastIndexOf(" ", 200);
+        if (cut < 50) {
+          cut = 200;
+        }
+        enqueue(pending.slice(0, cut));
+        pending = pending.slice(cut);
+      }
+
+      if (flushAll) {
+        enqueue(pending);
+        pending = "";
+      }
+    }
+
+    function playNext() {
+      if (completed || myToken !== speakToken || speakingNow) {
+        return;
+      }
+
+      if (queue.length === 0) {
+        if (finished) {
+          complete();
+        }
+        return;
+      }
+
+      const utterance = newUtterance(queue.shift());
+      speakingNow = true;
+
+      utterance.onend = () => {
+        speakingNow = false;
+        playNext();
+      };
+      utterance.onerror = () => {
+        speakingNow = false;
+        playNext();
+      };
+
+      synth.speak(utterance);
+    }
+
+    return {
+      push(piece) {
+        if (completed || myToken !== speakToken) {
+          return;
+        }
+        pending += piece;
+        takeSentences(false);
+        playNext();
+      },
+
+      finish(reply) {
+        if (!completed && myToken === speakToken) {
+          finished = true;
+          takeSentences(true);
+
+          // Safety net: never let NOVA get stuck "speaking".
+          watchdog = window.setTimeout(() => {
+            if (myToken === speakToken) {
+              stopSpeaking();
+            }
+          }, Math.min(120000, 8000 + (reply.length * 90) / savedRate()));
+
+          playNext();
+        }
+        return done;
+      },
+
+      abort() {
+        if (myToken === speakToken) {
+          stopSpeaking();
+        }
+      },
+    };
   }
 
   /* ----- Voice input (speech to text) ----- */
@@ -525,12 +656,20 @@
     setupVoicePanel();
   }
 
-  // app.js calls this when a reply arrives. Returning a promise makes the avatar "speak" until it resolves.
+  // app.js calls this when a finished reply arrives (no streaming). Returning a promise keeps the avatar "speaking".
   chat.setReplyHandler((reply) => {
     if (!canSpeak || !voiceOn) {
       return null;
     }
     return speak(reply);
+  });
+
+  // app.js calls this when the first words of a streamed answer arrive.
+  chat.setStreamHandler(() => {
+    if (!canSpeak || !voiceOn) {
+      return null;
+    }
+    return createStreamSpeaker();
   });
 
   voiceToggle.addEventListener("click", () => {
