@@ -3,9 +3,11 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import threading
 import time
-from collections import OrderedDict, deque
+from collections import deque
+from contextlib import closing
 from datetime import timedelta
 
 import requests
@@ -18,6 +20,8 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("nova")
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 # ---------- Settings (read from the .env file or the environment) ----------
@@ -42,9 +46,15 @@ HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = env_int("PORT", 5000, 1, 65535)
 MAX_MESSAGE_CHARS = env_int("MAX_MESSAGE_CHARS", 1000, 1, 4000)
 MAX_HISTORY_MESSAGES = env_int("MAX_HISTORY_MESSAGES", 20, 2, 100)
+HISTORY_DAYS = env_int("HISTORY_DAYS", 7, 1, 90)
 RATE_LIMIT_PER_MINUTE = env_int("RATE_LIMIT_PER_MINUTE", 30, 1, 600)
 MAX_SESSIONS = 500
 MAX_REPLY_CHARS = 2000
+
+_database_setting = os.environ.get("DATABASE_PATH", "nova.db").strip() or "nova.db"
+DATABASE_PATH = (
+    _database_setting if os.path.isabs(_database_setting) else os.path.join(BASE_DIR, _database_setting)
+)
 
 AI_MODE = os.environ.get("AI_MODE", "demo").strip().lower()
 if AI_MODE not in ("demo", "ollama"):
@@ -77,22 +87,43 @@ if env_bool("TRUST_PROXY", False):
 secret_key = os.environ.get("SECRET_KEY")
 if not secret_key:
     secret_key = secrets.token_hex(32)
-    log.warning("SECRET_KEY is not set. Using a temporary one; sessions reset when the server restarts.")
+    log.warning(
+        "SECRET_KEY is not set. Using a temporary one; saved conversations cannot be found again after a restart."
+    )
 
 app.secret_key = secret_key
 app.config.update(
     MAX_CONTENT_LENGTH=16 * 1024,  # refuse requests bigger than 16 KB
-    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+    PERMANENT_SESSION_LIFETIME=timedelta(days=HISTORY_DAYS),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=env_bool("SESSION_COOKIE_SECURE", False),
 )
 
 
-# ---------- Conversation history (kept in the server's memory) ----------
+# ---------- Conversation history (saved in a SQLite database file) ----------
 
-histories = OrderedDict()
-history_lock = threading.Lock()
+def connect_db():
+    connection = sqlite3.connect(DATABASE_PATH, timeout=5)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def init_db():
+    # "with closing(...) as connection, connection" closes the file at the end and saves the changes.
+    with closing(connect_db()) as connection, connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS messages ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "session_id TEXT NOT NULL, "
+            "role TEXT NOT NULL, "
+            "content TEXT NOT NULL, "
+            "created_at REAL NOT NULL)"
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, id)")
+
+
+init_db()
 
 
 def get_session_id():
@@ -100,36 +131,64 @@ def get_session_id():
     if not isinstance(sid, str) or len(sid) != 32:
         sid = secrets.token_hex(16)
         session["sid"] = sid
-    session.permanent = True  # keep the cookie for 7 days, not just until the browser closes
+    session.permanent = True  # keep the cookie for several days, not just until the browser closes
     return sid
 
 
 def get_history(sid):
-    with history_lock:
-        return [dict(item) for item in histories.get(sid, [])]
+    with closing(connect_db()) as connection:
+        rows = connection.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (sid, MAX_HISTORY_MESSAGES),
+        ).fetchall()
+    return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
 
 
-def add_to_history(sid, role, content):
-    with history_lock:
-        history = histories.get(sid)
-        if history is None:
-            history = []
-            histories[sid] = history
-        histories.move_to_end(sid)
-        history.append({"role": role, "content": content})
-        del history[:-MAX_HISTORY_MESSAGES]
-        while len(histories) > MAX_SESSIONS:
-            histories.popitem(last=False)
+def add_turn(sid, user_text, reply):
+    """Saves one question and its answer, then tidies up old data."""
+    now = time.time()
+    with closing(connect_db()) as connection, connection:
+        connection.executemany(
+            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            [(sid, "user", user_text, now), (sid, "assistant", reply, now)],
+        )
+        # Keep only the newest messages of this conversation.
+        connection.execute(
+            "DELETE FROM messages WHERE session_id = ? AND id NOT IN "
+            "(SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?)",
+            (sid, sid, MAX_HISTORY_MESSAGES),
+        )
+        # Forget messages older than HISTORY_DAYS.
+        connection.execute("DELETE FROM messages WHERE created_at < ?", (now - HISTORY_DAYS * 86400,))
+        # Keep only the newest MAX_SESSIONS conversations.
+        connection.execute(
+            "DELETE FROM messages WHERE session_id IN ("
+            "SELECT session_id FROM messages GROUP BY session_id ORDER BY MAX(id) DESC LIMIT -1 OFFSET ?)",
+            (MAX_SESSIONS,),
+        )
 
 
 def history_count(sid):
-    with history_lock:
-        return len(histories.get(sid, []))
+    with closing(connect_db()) as connection:
+        row = connection.execute("SELECT COUNT(*) AS total FROM messages WHERE session_id = ?", (sid,)).fetchone()
+    return row["total"]
 
 
 def clear_history(sid):
-    with history_lock:
-        histories.pop(sid, None)
+    with closing(connect_db()) as connection, connection:
+        connection.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+
+
+def clear_all_history():
+    # Used by the automatic tests to start from an empty database.
+    with closing(connect_db()) as connection, connection:
+        connection.execute("DELETE FROM messages")
+
+
+def count_sessions():
+    with closing(connect_db()) as connection:
+        row = connection.execute("SELECT COUNT(DISTINCT session_id) AS total FROM messages").fetchone()
+    return row["total"]
 
 
 # ---------- Simple rate limit (per IP address) ----------
@@ -399,8 +458,7 @@ def chat():
         reply = demo_reply(message)
 
     # Only save the conversation turn when everything worked.
-    add_to_history(sid, "user", message)
-    add_to_history(sid, "assistant", reply)
+    add_turn(sid, message, reply)
 
     return jsonify({"reply": reply, "mode": AI_MODE, "history_size": history_count(sid)})
 
@@ -455,8 +513,7 @@ def chat_stream():
             return
 
         # Only save the conversation turn when the whole answer arrived.
-        add_to_history(sid, "user", message)
-        add_to_history(sid, "assistant", reply)
+        add_turn(sid, message, reply)
         yield ndjson({"type": "done", "reply": reply, "mode": AI_MODE, "history_size": history_count(sid)})
 
     return Response(generate(), mimetype="application/x-ndjson", headers={"X-Accel-Buffering": "no"})

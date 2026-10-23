@@ -5,6 +5,7 @@ Run them from the project folder with:
 """
 import json
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -15,6 +16,7 @@ os.environ["SECRET_KEY"] = "test-secret-key-used-only-by-the-tests"
 os.environ["RATE_LIMIT_PER_MINUTE"] = "1000"
 os.environ["MAX_MESSAGE_CHARS"] = "1000"
 os.environ["MAX_HISTORY_MESSAGES"] = "20"
+os.environ["DATABASE_PATH"] = os.path.join(tempfile.mkdtemp(), "nova-test.db")
 
 import app as nova  # noqa: E402
 
@@ -29,7 +31,7 @@ class ApiTests(unittest.TestCase):
     def setUp(self):
         self.client = nova.app.test_client()
         nova.hits.clear()
-        nova.histories.clear()
+        nova.clear_all_history()
 
     def chat(self, message):
         return self.client.post("/api/chat", json={"message": message})
@@ -146,7 +148,7 @@ class StreamTests(unittest.TestCase):
     def setUp(self):
         self.client = nova.app.test_client()
         nova.hits.clear()
-        nova.histories.clear()
+        nova.clear_all_history()
 
     def test_demo_stream_sends_tokens_then_done(self):
         response = self.client.post("/api/chat/stream", json={"message": "Hello"})
@@ -207,7 +209,7 @@ class StreamTests(unittest.TestCase):
 
         self.assertEqual(events[0]["type"], "token")
         self.assertEqual(events[-1]["type"], "error")
-        self.assertEqual(len(nova.histories), 0)  # a half answer is never saved
+        self.assertEqual(nova.count_sessions(), 0)  # a half answer is never saved
 
 
 class OllamaTests(unittest.TestCase):
@@ -216,7 +218,7 @@ class OllamaTests(unittest.TestCase):
     def setUp(self):
         self.client = nova.app.test_client()
         nova.hits.clear()
-        nova.histories.clear()
+        nova.clear_all_history()
 
     def test_ollama_reply_is_returned(self):
         fake = mock.Mock(status_code=200)
@@ -235,7 +237,7 @@ class OllamaTests(unittest.TestCase):
             response = self.client.post("/api/chat", json={"message": "Hello"})
         self.assertEqual(response.status_code, 503)
         self.assertIn("Ollama", response.get_json()["error"])
-        self.assertEqual(len(nova.histories), 0)  # a failed answer is not saved
+        self.assertEqual(nova.count_sessions(), 0)  # a failed answer is not saved
 
     def test_ollama_timeout_gives_friendly_error(self):
         with mock.patch.object(nova, "AI_MODE", "ollama"), mock.patch.object(

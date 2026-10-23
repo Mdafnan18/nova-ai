@@ -36,6 +36,7 @@ The public website runs in **demo mode** with a few built-in replies, because a 
 - Python and Flask (backend and JSON API)
 - HTML5, CSS3 and vanilla JavaScript (frontend)
 - Ollama with the qwen2.5:3b model (local AI)
+- SQLite (conversation storage)
 - Web Speech API (browser voice input and spoken replies)
 - gunicorn and Render (free hosting)
 - Git and GitHub
@@ -102,6 +103,8 @@ All settings live in a `.env` file (never uploaded to GitHub). See `.env.example
 | `OLLAMA_MAX_TOKENS` | Maximum length of an answer |
 | `MAX_MESSAGE_CHARS` | Longest message accepted |
 | `MAX_HISTORY_MESSAGES` | How many messages NOVA remembers |
+| `DATABASE_PATH` | Where conversations are stored (a SQLite file), default `nova.db` |
+| `HISTORY_DAYS` | How many days conversations are kept, default 7 |
 | `RATE_LIMIT_PER_MINUTE` | Chat requests allowed per minute per visitor |
 | `SECRET_KEY` | Secret used to sign the session cookie |
 | `FLASK_DEBUG` | `1` on a laptop only, always `0` on a public site |
@@ -137,6 +140,7 @@ They also run on every push with GitHub Actions.
 - No API keys or secrets in the frontend code, and `.env` is ignored by Git
 - Security headers and a strict Content-Security-Policy in production
 - Ollama only listens on the local computer and is never exposed to the internet
+- Conversations are stored on the server for up to 7 days, and Clear chat deletes them
 
 ## Deploy for free on Render
 
@@ -150,7 +154,7 @@ They also run on every push with GitHub Actions.
 
 - The public site uses demo mode. Real AI answers need Ollama running on your own computer.
 - Free Render services sleep after 15 minutes without visitors, so the first load can be slow.
-- Chat memory is kept in server memory and resets when the server restarts.
+- Conversations are stored in a small SQLite file on the server and kept for up to 7 days. On free hosting the file is erased when the service restarts or redeploys.
 - Voice input works in Chrome and Edge and needs internet, because the browser sends the audio to its own speech service.
 - Tested with Chrome on Windows 11.
 
