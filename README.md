@@ -1,5 +1,7 @@
 # NOVA AI
 
+![Tests](https://github.com/Mdafnan18/nova-ai/actions/workflows/tests.yml/badge.svg)
+
 An animated AI avatar you can talk to. NOVA listens to your voice, thinks with a local AI model running on your own computer, and answers out loud, all with free and open-source tools.
 
 ## Live demo
@@ -23,6 +25,7 @@ The public website runs in **demo mode** with a few built-in replies, because a 
 - Streaming answers that appear word by word as the AI writes them
 - Voice input with the microphone, with permission handling and a typed fallback
 - Spoken replies with a voice on/off button
+- Speaks the answer sentence by sentence while it is still being written
 - Enter to send, Shift+Enter for a new line, clear chat and suggested prompts
 - Health check that tells you if the backend or the AI model is not ready
 - Demo mode for public hosting when no AI model is available
@@ -113,6 +116,16 @@ All settings live in a `.env` file (never uploaded to GitHub). See `.env.example
 | `POST /api/chat` | Send `{"message": "Hello"}` and receive `{"reply": "..."}` |
 | `POST /api/clear` | Clears the conversation memory |
 
+## Tests
+
+The backend has automatic tests. They use pretend AI replies, so they run without Ollama. Run them with:
+
+```powershell
+python -m unittest tests.test_api -v
+```
+
+They also run on every push with GitHub Actions.
+
 ## Security
 
 - Messages are validated: they must be text, not empty, and within the size limit
@@ -149,6 +162,15 @@ All settings live in a `.env` file (never uploaded to GitHub). See `.env.example
 - Question answering over uploaded documents
 - A separately hosted AI backend for the public site
 
+## What I learned
+
+- Keeping the AI service behind my own backend, so the browser never talks to it directly and every message is checked first
+- Handling failures with friendly messages, such as Ollama being closed, a missing model or a slow answer
+- Streaming an answer to the browser line by line and speaking it sentence by sentence
+- Working with browser permissions for the microphone, and giving a typed fallback
+- Deploying with environment variables and keeping secrets out of Git
+- Writing automatic tests that use pretend AI replies
+
 ## Project structure
 
 ```text
@@ -162,5 +184,12 @@ nova-ai/
 |   `-- js/                app.js, effects.js, voice.js
 |-- templates/
 |   `-- index.html         The page
+|-- tests/                 Automatic tests
+|-- .github/workflows/     Test automation (GitHub Actions)
+|-- LICENSE                MIT License
 `-- docs/screenshots/      Pictures used in this README
 ```
+
+## License
+
+The code is released under the MIT License (see the LICENSE file). The AI model is downloaded separately through Ollama and has its own license, so check it before using the project commercially.
