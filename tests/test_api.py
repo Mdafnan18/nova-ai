@@ -95,7 +95,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_huge_request_is_rejected(self):
-        body = b'{"message":"' + b"a" * 20000 + b'"}'
+        body = b'{"message":"' + b"a" * 100000 + b'"}'
         response = self.client.post("/api/chat", data=body, content_type="application/json")
         self.assertEqual(response.status_code, 413)
 
@@ -264,6 +264,72 @@ class OllamaTests(unittest.TestCase):
         data = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertFalse(data["ai_ready"])
+
+
+class DocumentTests(unittest.TestCase):
+    """Tests for asking questions about an uploaded text file."""
+
+    def setUp(self):
+        self.client = nova.app.test_client()
+        nova.hits.clear()
+        nova.clear_all_history()
+
+    def upload(self, name="notes.txt", text="NOVA was built with Flask and Ollama."):
+        with mock.patch.object(nova, "AI_MODE", "ollama"):
+            return self.client.post("/api/document", json={"name": name, "text": text})
+
+    def test_document_is_saved_and_listed(self):
+        response = self.upload()
+        self.assertEqual(response.status_code, 200)
+        data = self.client.get("/api/document").get_json()
+        self.assertEqual(data["document"]["name"], "notes.txt")
+
+    def test_folders_are_removed_from_the_file_name(self):
+        self.upload(name="C:\\Users\\me\\notes.txt")
+        data = self.client.get("/api/document").get_json()
+        self.assertEqual(data["document"]["name"], "notes.txt")
+
+    def test_documents_are_not_allowed_in_demo_mode(self):
+        response = self.client.post("/api/document", json={"name": "notes.txt", "text": "Hello"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_empty_document_is_rejected(self):
+        response = self.upload(text="    ")
+        self.assertEqual(response.status_code, 400)
+
+    def test_document_that_is_too_long_is_rejected(self):
+        response = self.upload(text="a" * (nova.DOC_MAX_CHARS + 1))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("limit", response.get_json()["error"])
+
+    def test_other_file_types_are_rejected(self):
+        response = self.upload(name="photo.png")
+        self.assertEqual(response.status_code, 400)
+
+    def test_document_text_is_sent_to_the_ai(self):
+        self.upload(text="The secret code word is PINEAPPLE.")
+        fake = mock.Mock(status_code=200)
+        fake.json.return_value = {"message": {"content": "It is PINEAPPLE."}}
+        with mock.patch.object(nova, "AI_MODE", "ollama"), mock.patch.object(
+            nova.requests, "post", return_value=fake
+        ) as post:
+            response = self.client.post("/api/chat", json={"message": "What is the code word?"})
+        self.assertEqual(response.status_code, 200)
+        payload = post.call_args.kwargs["json"]
+        self.assertIn("PINEAPPLE", payload["messages"][0]["content"])
+
+    def test_clear_chat_also_removes_the_document(self):
+        self.upload()
+        self.client.post("/api/clear")
+        data = self.client.get("/api/document").get_json()
+        self.assertIsNone(data["document"])
+
+    def test_remove_document_endpoint(self):
+        self.upload()
+        response = self.client.post("/api/document/clear")
+        self.assertEqual(response.status_code, 200)
+        data = self.client.get("/api/document").get_json()
+        self.assertIsNone(data["document"])
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ The public website runs in **demo mode** with a few built-in replies, because a 
 - Animated avatar with five states: idle, listening, thinking, speaking and error
 - Glowing orbital rings, floating particles, blinking eyes and eyes that follow the mouse
 - Chat with real AI answers from a local model (Ollama), with a short conversation memory
+- Ask questions about a short .txt or .md file (local AI mode only)
 - Streaming answers that appear word by word as the AI writes them
 - Voice input with the microphone, with permission handling and a typed fallback
 - Spoken replies with a voice on/off button
@@ -101,6 +102,8 @@ All settings live in a `.env` file (never uploaded to GitHub). See `.env.example
 | `OLLAMA_MODEL` | Model name, default `qwen2.5:3b` |
 | `OLLAMA_TIMEOUT_SECONDS` | How long to wait for the AI before giving up |
 | `OLLAMA_MAX_TOKENS` | Maximum length of an answer |
+| `OLLAMA_NUM_CTX` | How much text the AI can read at once, default 4096 |
+| `DOC_MAX_CHARS` | Longest document accepted for questions, default 6000 characters |
 | `MAX_MESSAGE_CHARS` | Longest message accepted |
 | `MAX_HISTORY_MESSAGES` | How many messages NOVA remembers |
 | `DATABASE_PATH` | Where conversations are stored (a SQLite file), default `nova.db` |
@@ -118,6 +121,9 @@ All settings live in a `.env` file (never uploaded to GitHub). See `.env.example
 | `GET /api/health` | Reports the mode, whether the AI is ready and the message limit |
 | `POST /api/chat` | Send `{"message": "Hello"}` and receive `{"reply": "..."}` |
 | `POST /api/clear` | Clears the conversation memory |
+| `GET /api/document` | Tells the page if a document is loaded |
+| `POST /api/document` | Send `{"name": "notes.txt", "text": "..."}` to load a document (local AI mode only) |
+| `POST /api/document/clear` | Removes the loaded document |
 
 ## Tests
 
@@ -141,6 +147,7 @@ They also run on every push with GitHub Actions.
 - Security headers and a strict Content-Security-Policy in production
 - Ollama only listens on the local computer and is never exposed to the internet
 - Conversations are stored on the server for up to 7 days, and Clear chat deletes them
+- Uploaded documents are stored the same way, can be removed at any time, and are turned off in demo mode
 
 ## Deploy for free on Render
 

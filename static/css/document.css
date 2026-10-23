@@ -1,0 +1,49 @@
+/* NOVA AI - Stage 17 document panel */
+
+.doc-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.doc-panel[hidden] {
+  display: none;
+}
+
+.doc-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.doc-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.doc-status {
+  flex: 1 1 220px;
+  font-size: 0.85rem;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.doc-status.is-error {
+  color: #ff8da1;
+}
+
+.doc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.doc-actions [hidden] {
+  display: none;
+}
